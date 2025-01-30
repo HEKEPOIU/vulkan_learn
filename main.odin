@@ -17,6 +17,12 @@ MAX_FRAME_IN_FLIGHT :: 2
 VERT_SHADER_PATH :: #config(VERT_SHADER_PATH, "../shader/vert.sprv")
 FRAGMENT_SHADER_PATH :: #config(FRAGMENT_SHADER_PATH, "../shader/frag.sprv")
 
+Input_Vertices: []Vertex = {
+	{{0.0, -0.5}, {1.0, 1.0, 1.0}},
+	{{0.5, 0.5}, {0.0, 1.0, 0.0}},
+	{{-0.5, 0.5}, {1.0, 0.0, 1.0}},
+}
+
 when ODIN_DEBUG {
 	Debug_Validaion_Layers :: []cstring{"VK_LAYER_KHRONOS_validation"}
 	debug_logger: log.Logger
@@ -106,6 +112,8 @@ VkContext :: struct {
 	in_flight_fences:         [dynamic]vk.Fence,
 	current_frame:            u32,
 	frame_buffer_resized:     bool,
+	vertex_buffer:            vk.Buffer,
+	vertex_buffer_memory:     vk.DeviceMemory,
 
 	//-- Only need on windows render.
 	surface:                  vk.SurfaceKHR,
@@ -118,9 +126,99 @@ VkContext :: struct {
 	//--
 }
 
+Vertex :: struct {
+	pos:   linalg.Vector2f32,
+	color: linalg.Vector3f32,
+}
+
+get_binding_description :: proc() -> vk.VertexInputBindingDescription {
+	binding_description: vk.VertexInputBindingDescription = {
+		binding   = 0,
+		stride    = size_of(Vertex),
+		inputRate = .VERTEX,
+	}
+	return binding_description
+}
+get_attribute_description :: proc() -> [2]vk.VertexInputAttributeDescription {
+	attribute_descs: [2]vk.VertexInputAttributeDescription
+	attribute_descs[0].binding = 0
+	attribute_descs[0].location = 0 // from vert.glsl in layout 0
+	attribute_descs[0].format = .R32G32_SFLOAT
+	attribute_descs[0].offset = (u32)(offset_of(Vertex, pos))
+
+	attribute_descs[1].binding = 0
+	attribute_descs[1].location = 1 // from vert.glsl in layout 0
+	attribute_descs[1].format = .R32G32B32_SFLOAT
+	attribute_descs[1].offset = (u32)(offset_of(Vertex, color))
+
+
+	return attribute_descs
+}
+
 QueueFamilyIndices :: struct {
 	graphics_family: Maybe(u32),
 	present_fanmily: Maybe(u32),
+}
+
+create_vertex_buffer :: proc(using ctx: ^VkContext) -> IsError {
+	buffer_info: vk.BufferCreateInfo = {
+		sType       = .BUFFER_CREATE_INFO,
+		size        = vk.DeviceSize(size_of(Input_Vertices[0]) * len(Input_Vertices)),
+		usage       = {.VERTEX_BUFFER},
+		sharingMode = .EXCLUSIVE,
+		flags       = {},
+	}
+	if vk.CreateBuffer(device, &buffer_info, nil, &vertex_buffer) != .SUCCESS {
+		log.error("Failed to create vertex buffer")
+		return true
+	}
+	mem_requirement: vk.MemoryRequirements
+	vk.GetBufferMemoryRequirements(device, vertex_buffer, &mem_requirement)
+	type_index := find_memory_type(
+		ctx,
+		mem_requirement.memoryTypeBits,
+		{.HOST_VISIBLE, .HOST_COHERENT},
+	)
+	if type_index == nil {
+		log.error("Can't find suitable memory type index")
+		return true
+	}
+	alloc_info: vk.MemoryAllocateInfo = {
+		sType           = .MEMORY_ALLOCATE_INFO,
+		allocationSize  = mem_requirement.size,
+		memoryTypeIndex = type_index.(u32),
+	}
+	if vk.AllocateMemory(device, &alloc_info, nil, &vertex_buffer_memory) != .SUCCESS {
+		log.error("Allocate buffer memory Failed")
+		return true
+	}
+
+	vk.BindBufferMemory(device, vertex_buffer, vertex_buffer_memory, 0)
+
+
+	data: rawptr
+	vk.MapMemory(device, vertex_buffer_memory, 0, buffer_info.size, {}, &data)
+	mem.copy(data, &Input_Vertices[0], int(buffer_info.size))
+	vk.UnmapMemory(device, vertex_buffer_memory)
+
+	log.info("Success create vertex buffer")
+	return false
+}
+
+find_memory_type :: proc(
+	using ctx: ^VkContext,
+	type_filter: u32,
+	properties: vk.MemoryPropertyFlags,
+) -> Maybe(u32) {
+	mem_properties: vk.PhysicalDeviceMemoryProperties
+	vk.GetPhysicalDeviceMemoryProperties(physical_device, &mem_properties)
+	for i in 0 ..< mem_properties.memoryTypeCount {
+		if (type_filter & (1 << i) == (1 << i)) &&
+		   (mem_properties.memoryTypes[i].propertyFlags & properties == properties) {
+			return i
+		}
+	}
+	return nil
 }
 
 SwapChainSupportDetails :: struct {
@@ -178,7 +276,6 @@ recreate_swap_chain :: proc(using ctx: ^VkContext, window: glfw.WindowHandle) ->
 }
 
 draw_frame :: proc(using ctx: ^VkContext, window: glfw.WindowHandle) -> IsError {
-
 	vk.WaitForFences(device, 1, &in_flight_fences[current_frame], true, max(u64))
 
 	image_index: u32
@@ -316,10 +413,14 @@ record_command_buffer :: proc(
 		offset = {0, 0},
 		extent = swap_chain_extent,
 	}
+	vertex_buffers: []vk.Buffer = {vertex_buffer}
+	offsets: []vk.DeviceSize = {0}
+
+	vk.CmdBindVertexBuffers(target_buffer, 0, 1, &vertex_buffers[0], &offsets[0])
 	vk.CmdSetViewport(target_buffer, 0, 1, &view_port)
 	vk.CmdSetScissor(target_buffer, 0, 1, &scissor)
 
-	vk.CmdDraw(target_buffer, 3, 1, 0, 0)
+	vk.CmdDraw(target_buffer, (u32)(len(Input_Vertices)), 1, 0, 0)
 	vk.CmdEndRenderPass(target_buffer)
 
 	if vk.EndCommandBuffer(target_buffer) != .SUCCESS {
@@ -441,12 +542,15 @@ create_graphic_pipeline :: proc(using ctx: ^VkContext) -> IsError {
 		pDynamicStates    = raw_data(dynamic_states),
 	}
 
+	binding_description := get_binding_description()
+	attribute_description := get_attribute_description()
+
 	vertex_input_info: vk.PipelineVertexInputStateCreateInfo = {
-		sType                           = vk.StructureType.PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-		vertexBindingDescriptionCount   = 0,
-		pVertexBindingDescriptions      = nil,
-		vertexAttributeDescriptionCount = 0,
-		pVertexAttributeDescriptions    = nil,
+		sType                           = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+		vertexBindingDescriptionCount   = 1,
+		pVertexBindingDescriptions      = &binding_description,
+		vertexAttributeDescriptionCount = (u32)(len(attribute_description)),
+		pVertexAttributeDescriptions    = &attribute_description[0],
 	}
 
 	input_assembly: vk.PipelineInputAssemblyStateCreateInfo = {
@@ -1028,6 +1132,8 @@ clean_up :: proc(ctx: ^VkContext, window: glfw.WindowHandle) {
 	defer delete(ctx.command_buffers)
 
 	clean_up_swap_chain(ctx)
+	vk.DestroyBuffer(ctx.device, ctx.vertex_buffer, nil)
+	vk.FreeMemory(ctx.device, ctx.vertex_buffer_memory, nil)
 	vk.DestroyPipeline(ctx.device, ctx.graphic_pipeline, nil)
 	vk.DestroyPipelineLayout(ctx.device, ctx.pipeline_layout, nil)
 	vk.DestroyRenderPass(ctx.device, ctx.render_pass, nil)
@@ -1135,6 +1241,10 @@ main :: proc() {
 
 	if create_command_pool(&ctx) {
 		panic("Failed to create command pool")
+	}
+
+	if create_vertex_buffer(&ctx) {
+		panic("Failed to create vertex buffer ")
 	}
 
 	if create_command_buffer(&ctx) {
