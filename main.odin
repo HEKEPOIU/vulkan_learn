@@ -18,10 +18,12 @@ VERT_SHADER_PATH :: #config(VERT_SHADER_PATH, "../shader/vert.sprv")
 FRAGMENT_SHADER_PATH :: #config(FRAGMENT_SHADER_PATH, "../shader/frag.sprv")
 
 Input_Vertices: []Vertex = {
-	{{0.0, -0.5}, {1.0, 1.0, 1.0}},
-	{{0.5, 0.5}, {0.0, 1.0, 0.0}},
-	{{-0.5, 0.5}, {1.0, 0.0, 1.0}},
+	{{-0.5, -0.5}, {1.0, 0.0, 0.0}},
+	{{0.5, -0.5}, {0.0, 1.0, 0.0}},
+	{{0.5, 0.5}, {0.0, 0.0, 1.0}},
+	{{-0.5, 0.5}, {1.0, 1.0, 1.0}},
 }
+Input_Vertice_Indices: []u16 = {0, 1, 2, 2, 3, 0}
 
 when ODIN_DEBUG {
 	Debug_Validaion_Layers :: []cstring{"VK_LAYER_KHRONOS_validation"}
@@ -114,6 +116,8 @@ VkContext :: struct {
 	frame_buffer_resized:     bool,
 	vertex_buffer:            vk.Buffer,
 	vertex_buffer_memory:     vk.DeviceMemory,
+	index_buffer:             vk.Buffer,
+	index_buffer_memory:      vk.DeviceMemory,
 
 	//-- Only need on windows render.
 	surface:                  vk.SurfaceKHR,
@@ -160,25 +164,28 @@ QueueFamilyIndices :: struct {
 	present_fanmily: Maybe(u32),
 }
 
-create_vertex_buffer :: proc(using ctx: ^VkContext) -> IsError {
+create_buffer :: proc(
+	using ctx: ^VkContext,
+	size: vk.DeviceSize,
+	usage: vk.BufferUsageFlags,
+	properties: vk.MemoryPropertyFlags,
+	buffer: ^vk.Buffer,
+	buffer_memory: ^vk.DeviceMemory,
+) -> IsError {
 	buffer_info: vk.BufferCreateInfo = {
 		sType       = .BUFFER_CREATE_INFO,
-		size        = vk.DeviceSize(size_of(Input_Vertices[0]) * len(Input_Vertices)),
-		usage       = {.VERTEX_BUFFER},
+		size        = size,
+		usage       = usage,
 		sharingMode = .EXCLUSIVE,
 		flags       = {},
 	}
-	if vk.CreateBuffer(device, &buffer_info, nil, &vertex_buffer) != .SUCCESS {
+	if vk.CreateBuffer(device, &buffer_info, nil, buffer) != .SUCCESS {
 		log.error("Failed to create vertex buffer")
 		return true
 	}
 	mem_requirement: vk.MemoryRequirements
-	vk.GetBufferMemoryRequirements(device, vertex_buffer, &mem_requirement)
-	type_index := find_memory_type(
-		ctx,
-		mem_requirement.memoryTypeBits,
-		{.HOST_VISIBLE, .HOST_COHERENT},
-	)
+	vk.GetBufferMemoryRequirements(device, buffer^, &mem_requirement)
+	type_index := find_memory_type(ctx, mem_requirement.memoryTypeBits, properties)
 	if type_index == nil {
 		log.error("Can't find suitable memory type index")
 		return true
@@ -188,21 +195,156 @@ create_vertex_buffer :: proc(using ctx: ^VkContext) -> IsError {
 		allocationSize  = mem_requirement.size,
 		memoryTypeIndex = type_index.(u32),
 	}
-	if vk.AllocateMemory(device, &alloc_info, nil, &vertex_buffer_memory) != .SUCCESS {
+	if vk.AllocateMemory(device, &alloc_info, nil, buffer_memory) != .SUCCESS {
 		log.error("Allocate buffer memory Failed")
 		return true
 	}
 
-	vk.BindBufferMemory(device, vertex_buffer, vertex_buffer_memory, 0)
+	vk.BindBufferMemory(device, buffer^, buffer_memory^, 0)
+	return false
+}
 
+copy_buffer :: proc(
+	using ctx: ^VkContext,
+	src: vk.Buffer,
+	dst: vk.Buffer,
+	size: vk.DeviceSize,
+) -> IsError {
+	alloc_info: vk.CommandBufferAllocateInfo = {
+		sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
+		level              = .PRIMARY,
+		commandPool        = command_pool,
+		commandBufferCount = 1,
+	}
+	command_buffer: vk.CommandBuffer
+	if vk.AllocateCommandBuffers(device, &alloc_info, &command_buffer) != .SUCCESS {
+		log.error("failed to allocate command buffer")
+		return true
+	}
 
+	begin_info: vk.CommandBufferBeginInfo = {
+		sType = .COMMAND_BUFFER_BEGIN_INFO,
+		flags = {.ONE_TIME_SUBMIT},
+	}
+	if vk.BeginCommandBuffer(command_buffer, &begin_info) != .SUCCESS {
+		log.error("failed to Begin command buffer")
+		return true
+	}
+
+	copy_region: vk.BufferCopy = {
+		srcOffset = 0,
+		dstOffset = 0,
+		size      = size,
+	}
+	vk.CmdCopyBuffer(command_buffer, src, dst, 1, &copy_region)
+	if vk.EndCommandBuffer(command_buffer) != .SUCCESS {
+		log.error("Failed to end command buffer")
+		return true
+	}
+	submit_info: vk.SubmitInfo = {
+		sType              = .SUBMIT_INFO,
+		commandBufferCount = 1,
+		pCommandBuffers    = &command_buffer,
+	}
+	if vk.QueueSubmit(graphic_queue, 1, &submit_info, 0) != .SUCCESS {
+		log.error("Failed to submit cmd to queue")
+		return true
+	}
+	if vk.QueueWaitIdle(graphic_queue) != .SUCCESS {
+		log.error("Wait copy finish failed")
+		return true
+	}
+	vk.FreeCommandBuffers(device, command_pool, 1, &command_buffer)
+	return false
+}
+
+create_vertex_buffer :: proc(using ctx: ^VkContext) -> IsError {
+	buffer_size := vk.DeviceSize(size_of(Input_Vertices[0]) * len(Input_Vertices))
+	staging_buffer: vk.Buffer
+	staging_buffer_memory: vk.DeviceMemory
+	result := create_buffer(
+		ctx,
+		buffer_size,
+		{.TRANSFER_SRC},
+		{.HOST_VISIBLE, .HOST_COHERENT},
+		&staging_buffer,
+		&staging_buffer_memory,
+	)
+	if result {
+		log.error("Faild to create staging buffer")
+		return true
+	}
 	data: rawptr
-	vk.MapMemory(device, vertex_buffer_memory, 0, buffer_info.size, {}, &data)
-	mem.copy(data, &Input_Vertices[0], int(buffer_info.size))
-	vk.UnmapMemory(device, vertex_buffer_memory)
+	vk.MapMemory(device, staging_buffer_memory, 0, buffer_size, {}, &data)
+	mem.copy(data, &Input_Vertices[0], int(buffer_size))
+	vk.UnmapMemory(device, staging_buffer_memory)
+
+	result = create_buffer(
+		ctx,
+		buffer_size,
+		{.VERTEX_BUFFER, .TRANSFER_DST},
+		{.DEVICE_LOCAL},
+		&vertex_buffer,
+		&vertex_buffer_memory,
+	)
+	if result {
+		log.error("Faild to create vertex buffer")
+		return true
+	}
+
+	copy_buffer(ctx, staging_buffer, vertex_buffer, buffer_size)
+
+	vk.DestroyBuffer(device, staging_buffer, nil)
+	vk.FreeMemory(device, staging_buffer_memory, nil)
+
 
 	log.info("Success create vertex buffer")
 	return false
+}
+
+create_index_buffer :: proc(using ctx: ^VkContext) -> IsError {
+	buffer_size := vk.DeviceSize(size_of(Input_Vertice_Indices[0]) * len(Input_Vertice_Indices))
+	staging_buffer: vk.Buffer
+	staging_buffer_memory: vk.DeviceMemory
+	result := create_buffer(
+		ctx,
+		buffer_size,
+		{.TRANSFER_SRC},
+		{.HOST_VISIBLE, .HOST_COHERENT},
+		&staging_buffer,
+		&staging_buffer_memory,
+	)
+	if result {
+		log.error("Faild to create staging buffer")
+		return true
+	}
+	data: rawptr
+	vk.MapMemory(device, staging_buffer_memory, 0, buffer_size, {}, &data)
+	mem.copy(data, &Input_Vertice_Indices[0], int(buffer_size))
+	vk.UnmapMemory(device, staging_buffer_memory)
+
+	result = create_buffer(
+		ctx,
+		buffer_size,
+		{.INDEX_BUFFER, .TRANSFER_DST},
+		{.DEVICE_LOCAL},
+		&index_buffer,
+		&index_buffer_memory,
+	)
+	if result {
+		log.error("Faild to create index buffer")
+		return true
+	}
+
+	copy_buffer(ctx, staging_buffer, index_buffer, buffer_size)
+
+	vk.DestroyBuffer(device, staging_buffer, nil)
+	vk.FreeMemory(device, staging_buffer_memory, nil)
+
+
+	log.info("Success create index buffer")
+	return false
+
 }
 
 find_memory_type :: proc(
@@ -417,10 +559,11 @@ record_command_buffer :: proc(
 	offsets: []vk.DeviceSize = {0}
 
 	vk.CmdBindVertexBuffers(target_buffer, 0, 1, &vertex_buffers[0], &offsets[0])
+	vk.CmdBindIndexBuffer(target_buffer, index_buffer, 0, .UINT16)
 	vk.CmdSetViewport(target_buffer, 0, 1, &view_port)
 	vk.CmdSetScissor(target_buffer, 0, 1, &scissor)
 
-	vk.CmdDraw(target_buffer, (u32)(len(Input_Vertices)), 1, 0, 0)
+	vk.CmdDrawIndexed(target_buffer, (u32)(len(Input_Vertice_Indices)), 1, 0, 0, 0)
 	vk.CmdEndRenderPass(target_buffer)
 
 	if vk.EndCommandBuffer(target_buffer) != .SUCCESS {
@@ -1132,6 +1275,8 @@ clean_up :: proc(ctx: ^VkContext, window: glfw.WindowHandle) {
 	defer delete(ctx.command_buffers)
 
 	clean_up_swap_chain(ctx)
+	vk.DestroyBuffer(ctx.device, ctx.index_buffer, nil)
+	vk.FreeMemory(ctx.device, ctx.index_buffer_memory, nil)
 	vk.DestroyBuffer(ctx.device, ctx.vertex_buffer, nil)
 	vk.FreeMemory(ctx.device, ctx.vertex_buffer_memory, nil)
 	vk.DestroyPipeline(ctx.device, ctx.graphic_pipeline, nil)
@@ -1245,6 +1390,9 @@ main :: proc() {
 
 	if create_vertex_buffer(&ctx) {
 		panic("Failed to create vertex buffer ")
+	}
+	if create_index_buffer(&ctx) {
+		panic("Failed to create index buffer ")
 	}
 
 	if create_command_buffer(&ctx) {
