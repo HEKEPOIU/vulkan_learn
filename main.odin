@@ -7,6 +7,7 @@ import "core:math/linalg"
 import "core:mem"
 import "core:os"
 import "core:strings"
+import "core:time"
 import "vendor:glfw"
 import vk "vendor:vulkan"
 
@@ -16,6 +17,8 @@ HIGHT :: 600
 MAX_FRAME_IN_FLIGHT :: 2
 VERT_SHADER_PATH :: #config(VERT_SHADER_PATH, "../shader/vert.sprv")
 FRAGMENT_SHADER_PATH :: #config(FRAGMENT_SHADER_PATH, "../shader/frag.sprv")
+START_TIME: time.Time
+
 
 Input_Vertices: []Vertex = {
 	{{-0.5, -0.5}, {1.0, 0.0, 0.0}},
@@ -105,8 +108,11 @@ VkContext :: struct {
 	graphic_queue:            vk.Queue,
 	present_queue:            vk.Queue,
 	render_pass:              vk.RenderPass,
+	descriptor_set_layout:    vk.DescriptorSetLayout,
 	pipeline_layout:          vk.PipelineLayout,
 	graphic_pipeline:         vk.Pipeline,
+	descriptor_pool:          vk.DescriptorPool,
+	descriptor_sets:          [dynamic]vk.DescriptorSet,
 	command_pool:             vk.CommandPool,
 	command_buffers:          [dynamic]vk.CommandBuffer,
 	image_available_sems:     [dynamic]vk.Semaphore,
@@ -118,6 +124,9 @@ VkContext :: struct {
 	vertex_buffer_memory:     vk.DeviceMemory,
 	index_buffer:             vk.Buffer,
 	index_buffer_memory:      vk.DeviceMemory,
+	uniform_buffers:          [dynamic]vk.Buffer,
+	uniform_buffers_memory:   [dynamic]vk.DeviceMemory,
+	uniform_buffers_mapped:   [dynamic]rawptr,
 
 	//-- Only need on windows render.
 	surface:                  vk.SurfaceKHR,
@@ -133,6 +142,147 @@ VkContext :: struct {
 Vertex :: struct {
 	pos:   linalg.Vector2f32,
 	color: linalg.Vector3f32,
+}
+
+UniformBufferObject :: struct {
+	model: linalg.Matrix4f32,
+	view:  linalg.Matrix4f32,
+	proj:  linalg.Matrix4f32,
+}
+update_uniform_buffer :: proc(using ctx: ^VkContext, current_image: u32) {
+	current_time := time.now()
+	time := time.duration_seconds(time.diff(START_TIME, current_time))
+	ubo: UniformBufferObject = {
+		model = linalg.matrix4_rotate_f32(
+			f32(time * linalg.to_radians(90.)),
+			linalg.Vector3f32{0, 0, 1},
+		),
+		view  = linalg.matrix4_look_at_f32(
+			linalg.Vector3f32{2, 2, 2},
+			linalg.Vector3f32{0, 0, 0},
+			linalg.Vector3f32{0, 0, 1},
+		),
+		proj  = linalg.matrix4_perspective_f32(
+			f32(linalg.to_radians(45.0)),
+			f32(swap_chain_extent.width) / f32(swap_chain_extent.height),
+			0.1,
+			10.0,
+		),
+	}
+	ubo.proj[1][1] *= -1
+	mem.copy(uniform_buffers_mapped[current_image], &ubo, size_of(ubo))
+}
+
+create_uniform_buffers :: proc(using ctx: ^VkContext) -> IsError {
+	buffer_size: vk.DeviceSize = size_of(UniformBufferObject)
+	resize(&uniform_buffers, MAX_FRAME_IN_FLIGHT)
+	resize(&uniform_buffers_memory, MAX_FRAME_IN_FLIGHT)
+	resize(&uniform_buffers_mapped, MAX_FRAME_IN_FLIGHT)
+
+	for i in 0 ..< MAX_FRAME_IN_FLIGHT {
+		is_error := create_buffer(
+			ctx,
+			buffer_size,
+			{.UNIFORM_BUFFER},
+			{.HOST_VISIBLE, .HOST_COHERENT},
+			&uniform_buffers[i],
+			&uniform_buffers_memory[i],
+		)
+		if is_error {
+			log.infof("Failed to create %v uniform buffer", i)
+			return true
+		}
+		vk.MapMemory(
+			device,
+			uniform_buffers_memory[i],
+			0,
+			buffer_size,
+			{},
+			&uniform_buffers_mapped[i],
+		)
+	}
+
+	return false
+}
+
+create_descriptor_sets :: proc(using ctx: ^VkContext) -> IsError {
+	layouts := make([dynamic]vk.DescriptorSetLayout, MAX_FRAME_IN_FLIGHT, context.temp_allocator)
+	defer delete(layouts)
+	for i in 0 ..< MAX_FRAME_IN_FLIGHT {
+		layouts[i] = descriptor_set_layout
+	}
+	alloc_info: vk.DescriptorSetAllocateInfo = {
+		sType              = .DESCRIPTOR_SET_ALLOCATE_INFO,
+		descriptorPool     = descriptor_pool,
+		descriptorSetCount = MAX_FRAME_IN_FLIGHT,
+		pSetLayouts        = &layouts[0],
+	}
+	resize(&descriptor_sets, MAX_FRAME_IN_FLIGHT)
+	if vk.AllocateDescriptorSets(device, &alloc_info, &descriptor_sets[0]) != .SUCCESS {
+		return true
+	}
+	for i in 0 ..< MAX_FRAME_IN_FLIGHT {
+		buffer_info: vk.DescriptorBufferInfo = {
+			buffer = uniform_buffers[i],
+			offset = 0,
+			range  = size_of(UniformBufferObject), // Overide whole buffer also can use VK_WHOLE_SIZE.
+		}
+		descriptor_write: vk.WriteDescriptorSet = {
+			sType            = .WRITE_DESCRIPTOR_SET,
+			dstSet           = descriptor_sets[i],
+			dstBinding       = 0,
+			dstArrayElement  = 0,
+			descriptorType   = .UNIFORM_BUFFER,
+			descriptorCount  = 1,
+			pBufferInfo      = &buffer_info,
+			pImageInfo       = nil,
+			pTexelBufferView = nil,
+		}
+		vk.UpdateDescriptorSets(device, 1, &descriptor_write, 0, nil)
+	}
+	return false
+}
+
+create_descriptor_pool :: proc(using ctx: ^VkContext) -> IsError {
+	pool_size: vk.DescriptorPoolSize = {
+		type            = .UNIFORM_BUFFER,
+		descriptorCount = MAX_FRAME_IN_FLIGHT,
+	}
+	pool_info: vk.DescriptorPoolCreateInfo = {
+		sType         = .DESCRIPTOR_POOL_CREATE_INFO,
+		poolSizeCount = 1,
+		pPoolSizes    = &pool_size,
+		maxSets       = MAX_FRAME_IN_FLIGHT,
+	}
+
+	if vk.CreateDescriptorPool(device, &pool_info, nil, &descriptor_pool) != .SUCCESS {
+		return true
+	}
+
+	return false
+}
+
+create_descriptor_set_layout :: proc(using ctx: ^VkContext) -> IsError {
+	ubo_layout_binding: vk.DescriptorSetLayoutBinding = {
+		binding            = 0,
+		descriptorType     = .UNIFORM_BUFFER,
+		descriptorCount    = 1,
+		stageFlags         = {.VERTEX},
+		pImmutableSamplers = nil,
+	}
+	layout_info: vk.DescriptorSetLayoutCreateInfo = {
+		sType        = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		bindingCount = 1,
+		pBindings    = &ubo_layout_binding,
+	}
+
+	if vk.CreateDescriptorSetLayout(device, &layout_info, nil, &descriptor_set_layout) !=
+	   .SUCCESS {
+		return true
+	}
+
+	log.info("Create descriptor set layout success")
+	return false
 }
 
 get_binding_description :: proc() -> vk.VertexInputBindingDescription {
@@ -438,6 +588,7 @@ draw_frame :: proc(using ctx: ^VkContext, window: glfw.WindowHandle) -> IsError 
 		log.error("Failed to acquire swap chain image")
 		return true
 	}
+	update_uniform_buffer(ctx, current_frame)
 
 	vk.ResetFences(device, 1, &in_flight_fences[current_frame])
 	vk.ResetCommandBuffer(command_buffers[current_frame], {})
@@ -563,6 +714,16 @@ record_command_buffer :: proc(
 	vk.CmdSetViewport(target_buffer, 0, 1, &view_port)
 	vk.CmdSetScissor(target_buffer, 0, 1, &scissor)
 
+	vk.CmdBindDescriptorSets(
+		target_buffer,
+		.GRAPHICS,
+		pipeline_layout,
+		0,
+		1,
+		&descriptor_sets[current_frame],
+		0,
+		nil,
+	)
 	vk.CmdDrawIndexed(target_buffer, (u32)(len(Input_Vertice_Indices)), 1, 0, 0, 0)
 	vk.CmdEndRenderPass(target_buffer)
 
@@ -729,7 +890,7 @@ create_graphic_pipeline :: proc(using ctx: ^VkContext) -> IsError {
 		polygonMode             = .FILL,
 		lineWidth               = 1.0,
 		cullMode                = {.BACK},
-		frontFace               = .CLOCKWISE,
+		frontFace               = .COUNTER_CLOCKWISE,
 		depthBiasEnable         = false,
 		depthBiasConstantFactor = 0.0,
 		depthBiasSlopeFactor    = 0.0,
@@ -767,8 +928,8 @@ create_graphic_pipeline :: proc(using ctx: ^VkContext) -> IsError {
 	}
 	pipeline_layout_info: vk.PipelineLayoutCreateInfo = {
 		sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
-		setLayoutCount         = 0,
-		pSetLayouts            = nil,
+		setLayoutCount         = 1,
+		pSetLayouts            = &descriptor_set_layout,
 		pushConstantRangeCount = 0,
 		pPushConstantRanges    = nil,
 	}
@@ -1273,8 +1434,18 @@ clean_up :: proc(ctx: ^VkContext, window: glfw.WindowHandle) {
 	defer delete(ctx.render_finish_sems)
 	defer delete(ctx.in_flight_fences)
 	defer delete(ctx.command_buffers)
+	defer delete(ctx.uniform_buffers_mapped)
+	defer delete(ctx.uniform_buffers_memory)
+	defer delete(ctx.uniform_buffers)
+	defer delete(ctx.descriptor_sets)
 
 	clean_up_swap_chain(ctx)
+	for i in 0 ..< MAX_FRAME_IN_FLIGHT {
+		vk.DestroyBuffer(ctx.device, ctx.uniform_buffers[i], nil)
+		vk.FreeMemory(ctx.device, ctx.uniform_buffers_memory[i], nil)
+	}
+	vk.DestroyDescriptorPool(ctx.device, ctx.descriptor_pool, nil)
+	vk.DestroyDescriptorSetLayout(ctx.device, ctx.descriptor_set_layout, nil)
 	vk.DestroyBuffer(ctx.device, ctx.index_buffer, nil)
 	vk.FreeMemory(ctx.device, ctx.index_buffer_memory, nil)
 	vk.DestroyBuffer(ctx.device, ctx.vertex_buffer, nil)
@@ -1376,6 +1547,10 @@ main :: proc() {
 		panic("Failed to create render pass")
 	}
 
+	if create_descriptor_set_layout(&ctx) {
+		panic("Failed to create descriptor set layout")
+	}
+
 	if create_graphic_pipeline(&ctx) {
 		panic("Failed to create graphic pipeline")
 	}
@@ -1394,6 +1569,17 @@ main :: proc() {
 	if create_index_buffer(&ctx) {
 		panic("Failed to create index buffer ")
 	}
+	if create_uniform_buffers(&ctx) {
+		panic("Failed to create uniform buffer")
+	}
+
+	if create_descriptor_pool(&ctx) {
+		panic("Failed to create descriptor pool")
+	}
+
+	if create_descriptor_sets(&ctx) {
+		panic("Failed to create descriptor sets")
+	}
 
 	if create_command_buffer(&ctx) {
 		panic("Failed to create command buffer")
@@ -1403,6 +1589,7 @@ main :: proc() {
 		panic("Failed to cteate sync objects")
 	}
 
+	START_TIME = time.now()
 	defer clean_up(&ctx, window)
 
 	for !glfw.WindowShouldClose(window) {
