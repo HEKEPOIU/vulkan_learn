@@ -86,7 +86,12 @@ when ODIN_DEBUG {
 	}
 }
 
-Device_Extensions: []cstring : {vk.KHR_SWAPCHAIN_EXTENSION_NAME}
+when ODIN_OS == .Darwin {
+	Device_Extensions: []cstring : {vk.KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_portability_subset"}
+
+} else {
+	Device_Extensions: []cstring : {vk.KHR_SWAPCHAIN_EXTENSION_NAME}
+}
 IsError :: bool
 
 VkContext :: struct {
@@ -985,6 +990,7 @@ create_instance :: proc(ctx: ^VkContext) -> IsError {
 		ppEnabledExtensionNames = raw_data(glfwExtensions),
 		enabledLayerCount       = 0,
 		pNext                   = nil,
+		flags                   = {.ENUMERATE_PORTABILITY_KHR},
 	}
 
 	when ODIN_DEBUG {
@@ -1010,6 +1016,10 @@ get_required_extensions :: proc() -> [dynamic]cstring {
 	glfw_extensions := [dynamic]cstring{}
 	extensions := glfw.GetRequiredInstanceExtensions()
 	append(&glfw_extensions, ..extensions)
+	when ODIN_OS == .Darwin {
+		append(&glfw_extensions, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
+		append(&glfw_extensions, vk.KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)
+	}
 
 	when ODIN_DEBUG {
 		append(&glfw_extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
@@ -1155,4 +1165,3 @@ main :: proc() {
 	}
 	vk.DeviceWaitIdle(ctx.device)
 }
-
