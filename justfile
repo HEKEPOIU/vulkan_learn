@@ -1,7 +1,7 @@
-Output_FName_Debug := "vulkan_learn_debug"
-Output_FName_Rel := "vulkan_learn_Rel"
-BFlag_Debug := "-debug --out=./build/" + Output_FName_Debug
-BFlag_Rel := "-disable-assert --out=./build/" + Output_FName_Rel
+Output_FName_Debug := "./build/vulkan_learn_debug"
+Output_FName_Rel := "./build/vulkan_learn_Rel"
+BFlag_Debug := "-debug --out=" + Output_FName_Debug
+BFlag_Rel := "-disable-assert --out=" + Output_FName_Rel
 
 
 build_debug: c_all_shader

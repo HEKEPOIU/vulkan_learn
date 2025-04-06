@@ -1,2 +1,4 @@
 *.sprv
 build
+.vscode
+.DS_Store
