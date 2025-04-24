@@ -23,10 +23,10 @@ START_TIME: time.Time
 
 
 Input_Vertices: []Vertex = {
-	{{-0.5, -0.5}, {1.0, 0.0, 0.0}, {1.0,0.0}},
+	{{-0.5, -0.5}, {1.0, 0.0, 0.0}, {1.0, 0.0}},
 	{{0.5, -0.5}, {0.0, 1.0, 0.0}, {0.0, 0.0}},
-	{{0.5, 0.5}, {0.0, 0.0, 1.0}, {0.0,1.0}},
-	{{-0.5, 0.5}, {1.0, 1.0, 1.0}, {1.0,1.0}},
+	{{0.5, 0.5}, {0.0, 0.0, 1.0}, {0.0, 1.0}},
+	{{-0.5, 0.5}, {1.0, 1.0, 1.0}, {1.0, 1.0}},
 }
 Input_Vertice_Indices: []u16 = {0, 1, 2, 2, 3, 0}
 
@@ -150,9 +150,9 @@ VkContext :: struct {
 }
 
 Vertex :: struct {
-	pos:   linalg.Vector2f32,
-	color: linalg.Vector3f32,
-    texCoord: linalg.Vector2f32,
+	pos:      linalg.Vector2f32,
+	color:    linalg.Vector3f32,
+	texCoord: linalg.Vector2f32,
 }
 
 UniformBufferObject :: struct {
@@ -607,10 +607,10 @@ get_attribute_description :: proc() -> [3]vk.VertexInputAttributeDescription {
 	attribute_descs[1].format = .R32G32B32_SFLOAT
 	attribute_descs[1].offset = (u32)(offset_of(Vertex, color))
 
-    attribute_descs[2].binding = 0
-    attribute_descs[2].location = 2 // from vert.glsl in layout 0
-    attribute_descs[2].format = .R32G32_SFLOAT
-    attribute_descs[2].offset = (u32)(offset_of(Vertex, texCoord))
+	attribute_descs[2].binding = 0
+	attribute_descs[2].location = 2 // from vert.glsl in layout 0
+	attribute_descs[2].format = .R32G32_SFLOAT
+	attribute_descs[2].offset = (u32)(offset_of(Vertex, texCoord))
 
 
 	return attribute_descs
@@ -1657,7 +1657,11 @@ create_instance :: proc(ctx: ^VkContext) -> IsError {
 		ppEnabledExtensionNames = raw_data(glfwExtensions),
 		enabledLayerCount       = 0,
 		pNext                   = nil,
-		flags                   = {.ENUMERATE_PORTABILITY_KHR},
+		flags                   = {},
+	}
+
+	when ODIN_OS == .Darwin {
+		createInfo.flags = {.ENUMERATE_PORTABILITY_KHR}
 	}
 
 	when ODIN_DEBUG {
@@ -1683,9 +1687,9 @@ get_required_extensions :: proc() -> [dynamic]cstring {
 	glfw_extensions := [dynamic]cstring{}
 	extensions := glfw.GetRequiredInstanceExtensions()
 	append(&glfw_extensions, ..extensions)
+    append(&glfw_extensions, vk.KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)
 	when ODIN_OS == .Darwin {
 		append(&glfw_extensions, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
-		append(&glfw_extensions, vk.KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)
 	}
 
 	when ODIN_DEBUG {
@@ -1884,3 +1888,4 @@ main :: proc() {
 	}
 	vk.DeviceWaitIdle(ctx.device)
 }
+
