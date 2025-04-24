@@ -1398,7 +1398,11 @@ create_instance :: proc(ctx: ^VkContext) -> IsError {
 		ppEnabledExtensionNames = raw_data(glfwExtensions),
 		enabledLayerCount       = 0,
 		pNext                   = nil,
-		flags                   = {.ENUMERATE_PORTABILITY_KHR},
+		flags                   = {},
+	}
+
+	when ODIN_OS == .Darwin {
+		createInfo.flags = {.ENUMERATE_PORTABILITY_KHR}
 	}
 
 	when ODIN_DEBUG {
@@ -1424,9 +1428,9 @@ get_required_extensions :: proc() -> [dynamic]cstring {
 	glfw_extensions := [dynamic]cstring{}
 	extensions := glfw.GetRequiredInstanceExtensions()
 	append(&glfw_extensions, ..extensions)
+    append(&glfw_extensions, vk.KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)
 	when ODIN_OS == .Darwin {
 		append(&glfw_extensions, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
-		append(&glfw_extensions, vk.KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)
 	}
 
 	when ODIN_DEBUG {
@@ -1610,3 +1614,4 @@ main :: proc() {
 	}
 	vk.DeviceWaitIdle(ctx.device)
 }
+
